@@ -220,8 +220,11 @@ fn next_word(s: &str) -> Option<(&str, &str)> {
 /// word, so `-C "a log"` cannot pass for a subcommand.
 fn piece_writes(mut rest: &str) -> bool {
     while let Some((w, r)) = next_word(rest) {
+        // A piece cut inside a quoted `|` has an unclosed quote, so its one word is the whole input:
+        // recursing into it would never end.
+        let nested = w.len() < rest.len() && w.contains(char::is_whitespace);
         rest = r;
-        if (w.contains(char::is_whitespace) && piece_writes(w)) || (command_word(w).eq_ignore_ascii_case("git") && !git_reads(r)) {
+        if (nested && piece_writes(w)) || (command_word(w).eq_ignore_ascii_case("git") && !git_reads(r)) {
             return true;
         }
     }
@@ -1614,5 +1617,19 @@ mod tests {
         assert_eq!(read_note("x.rs", 20, 65, &items), "atlas: x.rs lines 20-65 cut [impl Store 1-300] [fn a 10-30]");
         assert_eq!(read_note("x.rs", 1, 300, &items), "");
         assert_eq!(read_note("x.rs", 36, 50, &items), "atlas: x.rs lines 36-50 cut [impl Store 1-300] [fn b 35-60]");
+    }
+
+    #[test]
+    fn a_quoted_separator_does_not_overflow_the_stack() {
+        // `git_writes` cuts the command at every `|`, `&`, `;` and `$`, quoted or not, so `grep 'a|b' f`
+        // leaves the pieces `grep 'a` and `b' f`. The second opens a quote it never closes, `next_word`
+        // returns all of it as one word, and `piece_writes` recursed into that word forever: the hook
+        // aborted with a stack overflow (exit 134).
+        for cmd in ["grep 'a|b' f", "grep -E \"x;y\" f", "rg 'a&b' src", "grep '$HOME|x' f", "git log --grep 'a|b'"] {
+            assert!(routable(cmd), "{cmd} is a read and stays routed");
+        }
+        // A write is still caught next to a quoted separator.
+        assert!(!routable("grep 'a|b' f; git push"));
+        assert!(!routable("git commit -m 'a|b'"));
     }
 }
